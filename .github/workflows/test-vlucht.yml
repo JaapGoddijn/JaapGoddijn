@@ -20,16 +20,25 @@ jobs:
 
       - name: Ruwe API-controle TRA6260 (velden bekijken)
         run: |
-          curl -sS --max-time 10 -w '\nHTTP %{http_code}\n' \
-            https://api.adsb.lol/v2/callsign/TRA6260 | jq . || true
+          curl -sS --max-time 10 -o body.json -w 'HTTP %{http_code}\n' \
+            https://api.adsb.lol/v2/callsign/TRA6260
+          jq . body.json || cat body.json
+
+      - name: Route-endpoints verkennen (openapi.json)
+        run: |
+          curl -sS --max-time 10 -o openapi.json -w 'HTTP %{http_code}\n' https://api.adsb.lol/openapi.json || true
+          echo "--- paden met route/airport ---"
+          jq -r '.paths | to_entries[] | select(.key | test("route|airport|api/0")) | "\(.key)  [\(.value | keys | join(","))]"' openapi.json || head -c 2000 openapi.json
+          echo "--- alle paden ---"
+          jq -r '.paths | keys[]' openapi.json || true
+          echo "--- schema van routeset (indien aanwezig) ---"
+          jq '.paths["/api/0/routeset"] // .paths["/0/routeset"] // "geen routeset-pad"' openapi.json || true
 
       - name: Vliegende callsign zoeken rond Schiphol (250 nm)
         id: live
         run: |
           set -o pipefail
-          # Probeer /v2/point, val terug op /v2/lat/lon/dist.
-          J=$(curl -sS --max-time 10 https://api.adsb.lol/v2/point/52.31/4.76/250) \
-            || J=$(curl -sS --max-time 10 https://api.adsb.lol/v2/lat/52.31/lon/4.76/dist/250)
+          J=$(curl -sS --max-time 10 https://api.adsb.lol/v2/point/52.31/4.76/250)
           echo "$J" | jq '{total, now, n: (.ac|length)}'
           CS=$(echo "$J" | jq -r '
             [.ac[] | select(.flight != null and .lat != null and (.alt_baro|type) == "number" and .alt_baro > 10000)]
@@ -37,20 +46,36 @@ jobs:
           echo "Gekozen callsign: '$CS'"
           test -n "$CS"
           echo "callsign=$CS" >> "$GITHUB_OUTPUT"
+          echo "$J" | jq -r --arg cs "$CS" '.ac[] | select((.flight // "" | gsub("\\s+";"")) == $cs) | "\(.lat) \(.lon)"' | head -1 > latlon.txt
+          cat latlon.txt
+
+      - name: Route-kandidaten proberen voor vliegend toestel
+        run: |
+          CS='${{ steps.live.outputs.callsign }}'
+          read -r LAT LON < latlon.txt
+          PFX=${CS:0:2}
+          try() { # try METHODE URL [BODY]
+            echo "=== $1 $2 ==="
+            if [ "$1" = POST ]; then
+              curl -sS --max-time 10 -o out.txt -w 'HTTP %{http_code} (%{content_type})\n' \
+                -H 'Content-Type: application/json' -d "$3" "$2" || echo "curl-fout $?"
+            else
+              curl -sS --max-time 10 -o out.txt -w 'HTTP %{http_code} (%{content_type})\n' "$2" || echo "curl-fout $?"
+            fi
+            head -c 1500 out.txt; echo
+          }
+          try POST https://api.adsb.lol/api/0/routeset "{\"planes\":[{\"callsign\":\"$CS\",\"lat\":$LAT,\"lng\":$LON}]}"
+          try POST https://api.adsb.lol/0/routeset "{\"planes\":[{\"callsign\":\"$CS\",\"lat\":$LAT,\"lng\":$LON}]}"
+          try GET  "https://api.adsb.lol/api/0/route/$CS"
+          try GET  "https://api.adsb.lol/0/route/$CS"
+          try GET  "https://api.adsb.lol/v2/route/$CS"
+          try GET  "https://vrs-standing-data.adsb.lol/routes/$PFX/$CS.json"
 
       - name: Ruwe API-controle vliegend toestel (velden bekijken)
         run: |
           CS='${{ steps.live.outputs.callsign }}'
-          curl -sS --max-time 10 -w '\nHTTP %{http_code}\n' \
-            "https://api.adsb.lol/v2/callsign/$CS" | jq . || true
-          echo "--- routeset ---"
-          LATLON=$(curl -sS --max-time 10 "https://api.adsb.lol/v2/callsign/$CS" \
-            | jq -r '.ac[0] | "\(.lat) \(.lon)"')
-          set -- $LATLON
-          curl -sS --max-time 10 -w '\nHTTP %{http_code}\n' \
-            -H 'Content-Type: application/json' \
-            -d "{\"planes\":[{\"callsign\":\"$CS\",\"lat\":$1,\"lng\":$2}]}" \
-            https://api.adsb.lol/api/0/routeset | jq . || true
+          curl -sS --max-time 10 -o body.json -w 'HTTP %{http_code}\n' "https://api.adsb.lol/v2/callsign/$CS"
+          jq '.ac[0] | {hex, flight, r, t, alt_baro, gs, lat, lon, seen_pos, seen}' body.json
 
       - name: Script - TRA6260
         run: ./vlucht.sh TRA6260; echo "exit=$?"
