@@ -6,15 +6,16 @@
 # Vereisten: bash, curl, jq. Geen API-sleutel nodig.
 #
 # Omgevingsvariabelen (optioneel, voor testen):
-#   ADSB_API_BASE   basis-URL van de API (standaard https://api.adsb.lol)
-#   ADSB_ROUTE_URL  URL voor de route/bestemming-opzoeking
+#   ADSB_API_BASE    basis-URL van de API (standaard https://api.adsb.lol)
+#   ADSB_ROUTE_BASE  basis-URL van de route-data (standaard
+#                    https://vrs-standing-data.adsb.lol/routes)
 #
 # Exitcodes: 0 ok, 1 verkeerd gebruik, 2 jq ontbreekt, 3 API-fout.
 
 set -u
 
 BASIS="${ADSB_API_BASE:-https://api.adsb.lol}"
-ROUTE_URL="${ADSB_ROUTE_URL:-$BASIS/api/0/routeset}"
+ROUTE_BASIS="${ADSB_ROUTE_BASE:-https://vrs-standing-data.adsb.lol/routes}"
 TIMEOUT=10
 
 # --- Controles vooraf -------------------------------------------------------
@@ -116,26 +117,26 @@ SNELHEID="?"
 
 # --- Bestemming (best effort) ---------------------------------------------
 
-# adsb.lol heeft een aparte route-opzoeking op callsign + positie.
+# adsb.lol publiceert routes per callsign als statische JSON:
+#   <ROUTE_BASIS>/<eerste 2 tekens>/<CALLSIGN>.json
+# Antwoord bevat "_airports" (vertrek ... bestemming); 404 als onbekend.
 # Mislukt dit (time-out, onbekende route), dan laten we de bestemming weg.
 BESTEMMING=""
-if [ "$LAT" != "?" ] && [ "$LON" != "?" ]; then
-  ROUTE=$(curl -sS --fail --max-time "$TIMEOUT" \
-    -H 'Content-Type: application/json' \
-    -d "{\"planes\":[{\"callsign\":\"$CALLSIGN\",\"lat\":$LAT,\"lng\":$LON}]}" \
-    "$ROUTE_URL" 2>/dev/null) || ROUTE=""
-  if [ -n "$ROUTE" ]; then
-    # Laatste luchthaven in de route is de bestemming; anders de laatste code
-    # uit "airport_codes" (bijv. "AMS-LHR"). Onplausibele routes overslaan.
+ROUTE=$(curl -sS --fail --max-time "$TIMEOUT" \
+  "$ROUTE_BASIS/${CALLSIGN:0:2}/$CALLSIGN.json" 2>/dev/null) || ROUTE=""
+if [ -n "$ROUTE" ]; then
+  # Laatste luchthaven is de bestemming: "DUB (Dublin)". Valt terug op de
+  # laatste code uit "_airport_codes_iata" of "airport_codes" (bijv. "AMS-LHR").
+  BESTEMMING=$(printf '%s' "$ROUTE" | jq -r '
+    ( ._airports // [] | last // {} )
+    | if (.iata // .icao) then
+        (.iata // .icao) + (if .location then " (" + .location + ")" else "" end)
+      else empty end
+    ' 2>/dev/null | head -n 1)
+  if [ -z "$BESTEMMING" ]; then
     BESTEMMING=$(printf '%s' "$ROUTE" | jq -r '
-      ( if type == "array" then .[0] else . end ) // {}
-      | select((.plausible // 1) != 0 and (.plausible // true) != false)
-      | ( (._airports // [] | last // {} )
-          | if .iata or .icao then
-              (.iata // .icao) + (if .location then " (" + .location + ")" else "" end)
-            else empty end )
-        // ( .airport_codes // "" | split("-") | last | select(. != "" and . != "unknown") )
-      ' 2>/dev/null | head -n 1)
+      ( ._airport_codes_iata // .airport_codes // "" ) | split("-") | last
+      | select(. != "" and . != "unknown")' 2>/dev/null | head -n 1)
   fi
 fi
 BESTSTR=""

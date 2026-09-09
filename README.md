@@ -25,9 +25,18 @@ Exitcodes: 0 ok, 1 verkeerd gebruik, 2 jq/curl ontbreekt, 3 API-fout of time-out
 
 ## Testen zonder internet
 
-`ADSB_API_BASE` kan naar een map met mock-bestanden wijzen (curl leest `file://`):
+`ADSB_API_BASE` en `ADSB_ROUTE_BASE` kunnen naar mappen met mock-bestanden wijzen (curl leest `file://`):
 
 ```
-ADSB_API_BASE=file:///pad/naar/mock ./vlucht.sh KLM1001
-# leest /pad/naar/mock/v2/callsign/KLM1001
+ADSB_API_BASE=file:///pad/naar/mock ADSB_ROUTE_BASE=file:///pad/naar/mock/routes ./vlucht.sh KLM1001
+# leest /pad/naar/mock/v2/callsign/KLM1001 en /pad/naar/mock/routes/KL/KLM1001.json
 ```
+
+## Gebruikte endpoints
+
+- Positie: `GET https://api.adsb.lol/v2/callsign/<CALLSIGN>` (velden `r`, `t`, `alt_baro`, `gs`, `lat`, `lon`).
+- Bestemming: `GET https://vrs-standing-data.adsb.lol/routes/<2 letters>/<CALLSIGN>.json` (veld `_airports`, laatste = bestemming; 404 als onbekend).
+
+## Test tegen de echte API
+
+De workflow `.github/workflows/test-vlucht.yml` draait bij elke push van `vlucht.sh` op GitHub Actions: TRA6260 plus een op dat moment vliegende lijnvlucht.

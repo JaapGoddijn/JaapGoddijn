@@ -1,5 +1,4 @@
 # Test vlucht.sh tegen de echte adsb.lol API (GitHub-runners hebben internet).
-# Handmatig starten via "Run workflow" of via de API (workflow_dispatch).
 name: Test vlucht.sh
 
 on:
@@ -15,76 +14,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: jq en curl aanwezig
-        run: jq --version && curl --version | head -1
-
-      - name: Ruwe API-controle TRA6260 (velden bekijken)
+      - name: Ruwe API-controle TRA6260
         run: |
           curl -sS --max-time 10 -o body.json -w 'HTTP %{http_code}\n' \
             https://api.adsb.lol/v2/callsign/TRA6260
-          jq . body.json || cat body.json
+          jq -c . body.json
 
-      - name: Route-endpoints verkennen (openapi.json)
-        run: |
-          curl -sS --max-time 10 -o openapi.json -w 'HTTP %{http_code}\n' https://api.adsb.lol/openapi.json || true
-          echo "--- paden met route/airport ---"
-          jq -r '.paths | to_entries[] | select(.key | test("route|airport|api/0")) | "\(.key)  [\(.value | keys | join(","))]"' openapi.json || head -c 2000 openapi.json
-          echo "--- alle paden ---"
-          jq -r '.paths | keys[]' openapi.json || true
-          echo "--- schema van routeset (indien aanwezig) ---"
-          jq '.paths["/api/0/routeset"] // .paths["/0/routeset"] // "geen routeset-pad"' openapi.json || true
-
-      - name: Vliegende callsign zoeken rond Schiphol (250 nm)
+      - name: Vliegende lijnvlucht zoeken rond Schiphol (250 nm)
         id: live
         run: |
           set -o pipefail
-          J=$(curl -sS --max-time 10 https://api.adsb.lol/v2/point/52.31/4.76/250)
-          echo "$J" | jq '{total, now, n: (.ac|length)}'
-          CS=$(echo "$J" | jq -r '
-            [.ac[] | select(.flight != null and .lat != null and (.alt_baro|type) == "number" and .alt_baro > 10000 and (.flight | test("^(KLM|EZY|RYR|TRA|BAW|DLH|EJU)")))]
+          CS=$(curl -sS --max-time 10 https://api.adsb.lol/v2/point/52.31/4.76/250 | jq -r '
+            [.ac[] | select(.flight != null and .lat != null and (.alt_baro|type) == "number"
+                            and .alt_baro > 10000 and (.flight | test("^(KLM|EZY|RYR|TRA|BAW|DLH|EJU)")))]
             | sort_by(.seen_pos // 999) | .[0].flight // "" | gsub("\\s+";"")')
           echo "Gekozen callsign: '$CS'"
           test -n "$CS"
           echo "callsign=$CS" >> "$GITHUB_OUTPUT"
-          echo "$J" | jq -r --arg cs "$CS" '.ac[] | select((.flight // "" | gsub("\\s+";"")) == $cs) | "\(.lat) \(.lon)"' | head -1 > latlon.txt
-          cat latlon.txt
 
-      - name: Route-kandidaten proberen voor vliegend toestel
-        run: |
-          CS='${{ steps.live.outputs.callsign }}'
-          read -r LAT LON < latlon.txt
-          PFX=${CS:0:2}
-          try() { # try METHODE URL [BODY]
-            echo "=== $1 $2 ==="
-            if [ "$1" = POST ]; then
-              curl -sSL --max-time 15 -o out.txt -w 'HTTP %{http_code} (%{content_type}) eind-URL: %{url_effective}\n' \
-                -H 'Content-Type: application/json' -H 'Accept: application/json' -d "$3" "$2" || echo "curl-fout $?"
-            else
-              curl -sSL --max-time 15 -o out.txt -w 'HTTP %{http_code} (%{content_type}) eind-URL: %{url_effective}\n' \
-                -H 'Accept: application/json' "$2" || echo "curl-fout $?"
-            fi
-            echo "bytes: $(wc -c < out.txt)"; head -c 1200 out.txt; echo
-          }
-          try POST https://api.adsb.lol/api/0/routeset "{\"planes\":[{\"callsign\":\"$CS\",\"lat\":$LAT,\"lng\":$LON}]}"
-          try POST https://api.adsb.lol/api/0/routeset "{\"planes\":[{\"callsign\":\"KLM1001\",\"lat\":52.3,\"lng\":4.7}]}"
-          try GET  "https://api.adsb.lol/api/0/route/$CS"
-          try GET  "https://vrs-standing-data.adsb.lol/routes/$PFX/$CS.json"
-          try GET  "https://vrs-standing-data.adsb.lol/routes/KL/KLM1001.json"
-          echo "=== openapi-URL uit /docs ==="
-          curl -sS --max-time 10 https://api.adsb.lol/docs -o docs.html || true
-          grep -o "url: *['\"][^'\"]*['\"]" docs.html || grep -o '[^"'"'"' ]*openapi[^"'"'"' ]*' docs.html | sort -u || true
-          for u in /api/openapi.json /0/openapi.json /api/0/openapi.json /v2/openapi.json; do
-            printf '%s -> ' "$u"; curl -sS --max-time 10 -o oa.json -w '%{http_code}\n' "https://api.adsb.lol$u"
-            jq -r '.paths | keys[]' oa.json 2>/dev/null | grep -i -E 'route|airport' || true
-          done
-      - name: Ruwe API-controle vliegend toestel (velden bekijken)
+      - name: Ruwe API-controle vliegend toestel (positie en route)
         run: |
           CS='${{ steps.live.outputs.callsign }}'
           curl -sS --max-time 10 -o body.json -w 'HTTP %{http_code}\n' "https://api.adsb.lol/v2/callsign/$CS"
-          jq '.ac[0] | {hex, flight, r, t, alt_baro, gs, lat, lon, seen_pos, seen}' body.json
+          jq -c '.ac[0] | {hex, flight, r, t, alt_baro, gs, lat, lon, seen_pos}' body.json
+          curl -sS --max-time 10 -o route.json -w 'HTTP %{http_code}\n' \
+            "https://vrs-standing-data.adsb.lol/routes/${CS:0:2}/$CS.json" || true
+          jq -c '{airport_codes, _airport_codes_iata, dest: (._airports | last | {iata, location})}' route.json || cat route.json
 
-      - name: Script - TRA6260
+      - name: Script - TRA6260 (niet in de lucht)
         run: ./vlucht.sh TRA6260; echo "exit=$?"
 
       - name: Script - vliegend toestel
         run: ./vlucht.sh '${{ steps.live.outputs.callsign }}'; echo "exit=$?"
+
+      - name: Script - foutafhandeling
+        run: |
+          ./vlucht.sh || echo "exit=$?"
+          ADSB_API_BASE=https://api.adsb.lol/bestaat-niet ./vlucht.sh KLM1001 || echo "exit=$?"
