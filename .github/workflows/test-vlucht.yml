@@ -41,7 +41,7 @@ jobs:
           J=$(curl -sS --max-time 10 https://api.adsb.lol/v2/point/52.31/4.76/250)
           echo "$J" | jq '{total, now, n: (.ac|length)}'
           CS=$(echo "$J" | jq -r '
-            [.ac[] | select(.flight != null and .lat != null and (.alt_baro|type) == "number" and .alt_baro > 10000)]
+            [.ac[] | select(.flight != null and .lat != null and (.alt_baro|type) == "number" and .alt_baro > 10000 and (.flight | test("^(KLM|EZY|RYR|TRA|BAW|DLH|EJU)")))]
             | sort_by(.seen_pos // 999) | .[0].flight // "" | gsub("\\s+";"")')
           echo "Gekozen callsign: '$CS'"
           test -n "$CS"
@@ -57,20 +57,26 @@ jobs:
           try() { # try METHODE URL [BODY]
             echo "=== $1 $2 ==="
             if [ "$1" = POST ]; then
-              curl -sS --max-time 10 -o out.txt -w 'HTTP %{http_code} (%{content_type})\n' \
-                -H 'Content-Type: application/json' -d "$3" "$2" || echo "curl-fout $?"
+              curl -sSL --max-time 15 -o out.txt -w 'HTTP %{http_code} (%{content_type}) eind-URL: %{url_effective}\n' \
+                -H 'Content-Type: application/json' -H 'Accept: application/json' -d "$3" "$2" || echo "curl-fout $?"
             else
-              curl -sS --max-time 10 -o out.txt -w 'HTTP %{http_code} (%{content_type})\n' "$2" || echo "curl-fout $?"
+              curl -sSL --max-time 15 -o out.txt -w 'HTTP %{http_code} (%{content_type}) eind-URL: %{url_effective}\n' \
+                -H 'Accept: application/json' "$2" || echo "curl-fout $?"
             fi
-            head -c 1500 out.txt; echo
+            echo "bytes: $(wc -c < out.txt)"; head -c 1200 out.txt; echo
           }
           try POST https://api.adsb.lol/api/0/routeset "{\"planes\":[{\"callsign\":\"$CS\",\"lat\":$LAT,\"lng\":$LON}]}"
-          try POST https://api.adsb.lol/0/routeset "{\"planes\":[{\"callsign\":\"$CS\",\"lat\":$LAT,\"lng\":$LON}]}"
+          try POST https://api.adsb.lol/api/0/routeset "{\"planes\":[{\"callsign\":\"KLM1001\",\"lat\":52.3,\"lng\":4.7}]}"
           try GET  "https://api.adsb.lol/api/0/route/$CS"
-          try GET  "https://api.adsb.lol/0/route/$CS"
-          try GET  "https://api.adsb.lol/v2/route/$CS"
           try GET  "https://vrs-standing-data.adsb.lol/routes/$PFX/$CS.json"
-
+          try GET  "https://vrs-standing-data.adsb.lol/routes/KL/KLM1001.json"
+          echo "=== openapi-URL uit /docs ==="
+          curl -sS --max-time 10 https://api.adsb.lol/docs -o docs.html || true
+          grep -o "url: *['\"][^'\"]*['\"]" docs.html || grep -o '[^"'"'"' ]*openapi[^"'"'"' ]*' docs.html | sort -u || true
+          for u in /api/openapi.json /0/openapi.json /api/0/openapi.json /v2/openapi.json; do
+            printf '%s -> ' "$u"; curl -sS --max-time 10 -o oa.json -w '%{http_code}\n' "https://api.adsb.lol$u"
+            jq -r '.paths | keys[]' oa.json 2>/dev/null | grep -i -E 'route|airport' || true
+          done
       - name: Ruwe API-controle vliegend toestel (velden bekijken)
         run: |
           CS='${{ steps.live.outputs.callsign }}'
