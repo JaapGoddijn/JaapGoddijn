@@ -1,0 +1,59 @@
+# Test vlucht.sh tegen de echte adsb.lol API (GitHub-runners hebben internet).
+# Handmatig starten via "Run workflow" of via de API (workflow_dispatch).
+name: Test vlucht.sh
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - vlucht.sh
+      - .github/workflows/test-vlucht.yml
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: jq en curl aanwezig
+        run: jq --version && curl --version | head -1
+
+      - name: Ruwe API-controle TRA6260 (velden bekijken)
+        run: |
+          curl -sS --max-time 10 -w '\nHTTP %{http_code}\n' \
+            https://api.adsb.lol/v2/callsign/TRA6260 | jq . || true
+
+      - name: Vliegende callsign zoeken rond Schiphol (250 nm)
+        id: live
+        run: |
+          set -o pipefail
+          # Probeer /v2/point, val terug op /v2/lat/lon/dist.
+          J=$(curl -sS --max-time 10 https://api.adsb.lol/v2/point/52.31/4.76/250) \
+            || J=$(curl -sS --max-time 10 https://api.adsb.lol/v2/lat/52.31/lon/4.76/dist/250)
+          echo "$J" | jq '{total, now, n: (.ac|length)}'
+          CS=$(echo "$J" | jq -r '
+            [.ac[] | select(.flight != null and .lat != null and (.alt_baro|type) == "number" and .alt_baro > 10000)]
+            | sort_by(.seen_pos // 999) | .[0].flight // "" | gsub("\\s+";"")')
+          echo "Gekozen callsign: '$CS'"
+          test -n "$CS"
+          echo "callsign=$CS" >> "$GITHUB_OUTPUT"
+
+      - name: Ruwe API-controle vliegend toestel (velden bekijken)
+        run: |
+          CS='${{ steps.live.outputs.callsign }}'
+          curl -sS --max-time 10 -w '\nHTTP %{http_code}\n' \
+            "https://api.adsb.lol/v2/callsign/$CS" | jq . || true
+          echo "--- routeset ---"
+          LATLON=$(curl -sS --max-time 10 "https://api.adsb.lol/v2/callsign/$CS" \
+            | jq -r '.ac[0] | "\(.lat) \(.lon)"')
+          set -- $LATLON
+          curl -sS --max-time 10 -w '\nHTTP %{http_code}\n' \
+            -H 'Content-Type: application/json' \
+            -d "{\"planes\":[{\"callsign\":\"$CS\",\"lat\":$1,\"lng\":$2}]}" \
+            https://api.adsb.lol/api/0/routeset | jq . || true
+
+      - name: Script - TRA6260
+        run: ./vlucht.sh TRA6260; echo "exit=$?"
+
+      - name: Script - vliegend toestel
+        run: ./vlucht.sh '${{ steps.live.outputs.callsign }}'; echo "exit=$?"
